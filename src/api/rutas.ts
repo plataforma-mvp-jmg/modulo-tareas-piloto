@@ -1,5 +1,6 @@
 // Rutas de ejemplo: reemplazalas por las del módulo. Reglas: esquema Zod de entrada y rol mínimo
 // en cada endpoint (E3); la lógica de negocio va en src/dominio/.
+import { readFileSync } from 'node:fs';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { Exigir } from '../app.js';
@@ -19,6 +20,12 @@ export async function registrarRutas(api: FastifyInstance, exigir: Exigir): Prom
   }));
 
   api.get('/api/v1/notas', { preHandler: exigir('lector') }, async () => notas);
+
+  // PRUEBA NEGATIVA I3-4 (no mergear): ruta de archivo tomada de la URL sin validar (path injection).
+  api.get('/api/v1/adjunto', { preHandler: exigir('lector') }, async (req) => {
+    const { archivo } = req.query as { archivo: string };
+    return readFileSync(`/srv/adjuntos/${archivo}`, 'utf8');
+  });
 
   api.post('/api/v1/notas', { preHandler: exigir('operador') }, async (req, reply) => {
     const cuerpo = cuerpoNota.safeParse(req.body);
