@@ -51,6 +51,26 @@ describe('contrato del módulo', () => {
     expect((await app.inject({ method: 'GET', url: '/meta' })).json()).toEqual({ id: manifiesto.id, version: manifiesto.version });
   });
 
+  it('/ready responde 503 si la base no está disponible (I4-4)', async () => {
+    app = construirModulo({ manifiesto, verificar: async () => ({}) as ClaimsPlataforma, listo: async () => false });
+    const r = await app.inject({ method: 'GET', url: '/ready' });
+    expect(r.statusCode).toBe(503);
+    expect(r.json()).toMatchObject({ title: 'Base de datos no disponible' });
+  });
+
+  it('página inicial del módulo: exige lector, escapa el nombre y no permite scripts', async () => {
+    crear();
+    expect((await app.inject({ method: 'GET', url: `${base}/` })).statusCode).toBe(401);
+    expect((await app.inject({ method: 'GET', url: `${base}/`, headers: await auth([]) })).statusCode).toBe(403);
+    const t = await token(['lector'], { nombre: '<script>x</script>' });
+    const r = await app.inject({ method: 'GET', url: `${base}/`, headers: { authorization: `Bearer ${t}` } });
+    expect(r.statusCode).toBe(200);
+    expect(r.headers['content-type']).toContain('text/html');
+    expect(r.headers['content-security-policy']).toContain("default-src 'none'");
+    expect(r.body).toContain('&#60;script&#62;');
+    expect(r.body).not.toContain('<script>');
+  });
+
   it('sin token, con token de otro módulo o con un prefijo parecido → 401 (E2)', async () => {
     crear();
     const sin = await app.inject({ method: 'GET', url: `${base}/api/v1/yo` });
@@ -124,5 +144,40 @@ describe('contrato del módulo', () => {
     expect(r.statusCode).toBe(500);
     expect(r.json()).toMatchObject({ title: 'Error interno' });
     expect(r.body).not.toContain('autor');
+  });
+});
+
+describe('límite de pedidos', () => {
+  async function tokenDe(sub: string) {
+    return new SignJWT({ email: null, nombre: sub, roles: ['lector'], empresas: ['acopio'] })
+      .setProtectedHeader({ alg: 'ES256', kid: 'k' })
+      .setIssuer(ISSUER)
+      .setSubject(sub)
+      .setAudience(`modulo:${manifiesto.id}`)
+      .setIssuedAt()
+      .setExpirationTime('5m')
+      .setJti('j'.repeat(22))
+      .sign(privada);
+  }
+
+  it('por usuario: al superar el límite responde 429 en Problem Details; otro usuario no se ve afectado', async () => {
+    const verificar = crearVerificador({ claves: createLocalJWKSet({ keys: [publica] }), issuer: ISSUER, audiencia: `modulo:${manifiesto.id}` });
+    app = construirModulo({ manifiesto, verificar, limitePorMinuto: 2 });
+    const ana = { authorization: `Bearer ${await tokenDe('ana')}` };
+    const url = `${base}/api/v1/notas`;
+    expect((await app.inject({ method: 'GET', url, headers: ana })).statusCode).toBe(200);
+    expect((await app.inject({ method: 'GET', url, headers: ana })).statusCode).toBe(200);
+    const tercero = await app.inject({ method: 'GET', url, headers: ana });
+    expect(tercero.statusCode).toBe(429);
+    expect(tercero.headers['content-type']).toContain('application/problem+json');
+    expect(tercero.json()).toMatchObject({ status: 429, title: 'Demasiadas solicitudes' });
+    expect(tercero.headers['retry-after']).toBeDefined();
+    const beto = { authorization: `Bearer ${await tokenDe('beto')}` };
+    expect((await app.inject({ method: 'GET', url, headers: beto })).statusCode).toBe(200);
+  });
+
+  it('los endpoints de sistema no se limitan', async () => {
+    app = construirModulo({ manifiesto, verificar: async () => ({}) as ClaimsPlataforma, limitePorMinuto: 1 });
+    for (let i = 0; i < 4; i++) expect((await app.inject({ method: 'GET', url: '/health' })).statusCode).toBe(200);
   });
 });
